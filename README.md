@@ -1,2 +1,2 @@
 # ToyLang
-Toy language implementation try
+Trying to imlement toy language(in early development..)
