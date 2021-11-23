@@ -5,14 +5,9 @@
 #include <stdio.h>
 #include <unordered_map>
 #include <stack>
+#include "ByteCode.h"
 using namespace std;
 
-enum INSTR_TYPE {
-	INSTR_NOP=0,
-	INSTR_MOV,
-	INSTR_ADD,
-	INSTR_EOF,
-};
 enum Trap {
 	TRAP_OK,
 	TRAP_UNKNOWN,
@@ -29,83 +24,7 @@ struct ProgramInfo {
 * <function>(arg1, arg2, argn);    function call
 * if (<var>==<number>) block end
 */
-struct CodeGen {
-private:
-	void _write_begin(const string& stack_size) {
-		data_seg =
-			"Exit:														\n"
-			"	invoke  ExitProcess, 0									\n"
-			"section '.data' data readable writeable                     \n"
-			"	conTitle    db 'Console', 0					\n"
-			"	STD_INP_HNDL  dd - 10					\n"
-			"	STD_OUTP_HNDL dd - 11					\n"
-			"section '.bss' readable writeable		\n"
-			"	hStdIn      dd ?						\n"
-			"	hStdOut     dd ?						\n"
-			"	mem db "+stack_size+" dup(? )						\n";
-		end_seg =
-			"section '.idata' import data readable	\n"
-			"	library kernel, 'KERNEL32.DLL'			\n"
-			"											\n"
-			"	import kernel, \\						\n"
-			"	SetConsoleTitleA, 'SetConsoleTitleA', \\	\n"
-			"	GetStdHandle, 'GetStdHandle', \\		\n"
-			"	WriteConsoleA, 'WriteConsoleA', \\		\n"
-			"	ReadConsoleA, 'ReadConsoleA', \\		\n"
-			"	ExitProcess, 'ExitProcess'				\n";
-		fprintf(fout, 
-			"format PE Console 4.0\n"
-			"entry Start\n"
-			"include 'win32a.inc'\n"
-			"section '.text' code readable executable\n"
-			"Start :\n"
-			"	invoke SetConsoleTitleA, conTitle								\n"
-			"	test eax, eax												\n"
-			"	jz Exit														\n"
-			"	invoke GetStdHandle, [STD_OUTP_HNDL]						\n"
-			"	mov[hStdOut], eax											\n"
-			"	invoke GetStdHandle, [STD_INP_HNDL]							\n"
-			"	mov[hStdIn], eax											\n");
-	}
-public:
-	string data_seg;
-	string end_seg;
-	string temp;
-	FILE* fout;
 
-	CodeGen(const char* name) { fout = fopen(name, "w"); _write_begin("1000"); }
-	void i_mov(const char* left, int32_t right) { fprintf(fout, "	mov % s, % d\n", left, right); }
-	void i_mov(const char* left, const char* right) { fprintf(fout, "	mov %s, %s\n", left, right); }
-
-	void i_store32(int32_t off, const char* right) { fprintf(fout, "	mov dword [mem+%d], %s\n", off, right); }
-
-	void i_add(const char* left, int32_t right) { fprintf(fout, "	add %s, %d\n", left, right); }
-	void i_add(const char* left, const char* right) { fprintf(fout, "	add %s, %s\n", left, right); }
-
-	void i_mul(const char* left, int32_t right) { fprintf(fout, "	imul %s, %d\n", left, right); }
-	void i_mul(const char* left, const char* right) { fprintf(fout, "	imul %s, %s\n", left, right); }
-
-	void i_eq(const char* left, const char* right) {fprintf(fout, "    cmp %s, %s\n", left, right); }
-	void i_eq(const char* left, int32_t right) {fprintf(fout, "    cmp %s, %d\n", left, right); }
-	void i_if() { fprintf(fout, "    jz label_0000000000\n"); }
-
-
-	//void i_load32 (char reg, int32_t addr) { fprintf(fout, "	mov %s, [%d]\n", reg, addr); }
-	//void i_load32(char reg, char addr) { fprintf(fout, "	mov %s, [%d]\n", reg, addr); }
-	int32_t get_ptr() { return ftell(fout); }
-	void i_end_if(int32_t from, int32_t to) {
-		int now = ftell(fout);
-		fseek(fout, from, SEEK_SET);
-		temp = to_string(to);
-		while (temp.size() < 10) { temp += " "; }
-		fprintf(fout, "    jz label_%s\n", temp.c_str());//WRONG
-		fseek(fout, now, SEEK_SET);
-		fprintf(fout, "label_%d:\n", to);
-	}
-
-	void close() { if (fout == nullptr) return; fprintf(fout, "%s\n%s\n", data_seg.c_str(), end_seg.c_str()); fclose(fout); }
-	~CodeGen() { close(); }
-};
 enum VAR_TYPE {
 	TYPE_INT,
 	TYPE_NOP,
@@ -221,117 +140,105 @@ class Parser {
 	};
 	struct m_Var {
 	public:
+		string name;
 		int pos;
 		VAR_TYPE type;
-		m_Var(int Pos, VAR_TYPE Type = TYPE_NOP) :type(Type), pos(Pos) {}
+		m_Var(string Name, int Pos, VAR_TYPE Type = TYPE_NOP) :name(Name), type(Type), pos(Pos) {}
 		m_Var() {}
 		//m_Var(const m_Var& other):pos(other.pos), type(other.type) {}
 		//void operator=(const m_Var& other) { pos = other.pos; type = other.type; }
 	};
-	void h_assert (bool cond, Trap err = TRAP_UNKNOWN, const string& log = "") {if (!cond) { throw ParseException(err, log); }};
-	void print_vars() {for (auto it : vars) { cout << it.first << '\n'; }};
-	void push_expr_to_stack(Token x) {
-		f=lex.next_tok();
-		if (f.type == TOKEN_INT_NUMBER || f.type == TOKEN_IDENTIFIER) { h_assert(x.type == TOKEN_PLUS || x.type == TOKEN_MUL || x.type == TOKEN_MINUS, TRAP_UNEXPECTED_TOKEN); }
-		else if (f.type == TOKEN_PLUS || f.type == TOKEN_MINUS || f.type==TOKEN_MUL) { h_assert(x.type == TOKEN_INT_NUMBER || x.type == TOKEN_IDENTIFIER, TRAP_UNEXPECTED_TOKEN); }
-		
-		if (f.type == TOKEN_INT_NUMBER) { temp_stack1[temp_stack1c++] = f; push_expr_to_stack(f); }
-		else if (f.type == TOKEN_IDENTIFIER) { temp_stack1[temp_stack1c++] = f; push_expr_to_stack(f); }
-		else if (f.type == TOKEN_PLUS) { temp_stack2[temp_stack2c++] = "+"; push_expr_to_stack(f); }
-		else if (f.type == TOKEN_MUL) { temp_stack2[temp_stack2c++] = "*"; push_expr_to_stack(f); }
-		else if (f.type == TOKEN_MINUS) {
-			if (x.type == TOKEN_IDENTIFIER || x.type == TOKEN_INT_NUMBER) { temp_stack2[temp_stack2c++] = "+"; }
-			int now = temp_stack1c;
-			push_expr_to_stack(f);
-			temp_stack1[now].data = "-" + temp_stack1[now].data;
-		}
-		else if (f.type == TOKEN_SEMICOLON) { return; }
-		else h_assert(false, TRAP_UNEXPECTED_TOKEN);
-	}
-	Token f;
-	std::vector<Token> temp_stack1;
-	std::vector<string> temp_stack2;
+	void h_assert(bool cond, Trap err = TRAP_UNKNOWN, const string& log = "") { if (!cond) { throw ParseException(err, log); } };
+	Token f, x;
 	string temps, temp_name, temp_val;
 	int tempi = 0;
-	int temp_stack1c=0;
-	int temp_stack2c=0;
-	std::unordered_map<string, m_Var> vars;
-	std::unordered_map<string, int> op_order;
-	CodeGen code;
+	int alloc_count = 0;
+	std::vector<m_Var> vars;
+	std::vector<int32_t> locals;
+	ByteCode code;
 public:
 	Lexer lex;
-	Parser(const char* from, const char* to):code(to), lex(from), temp_stack1(1000), temp_stack2(1000) {
-		op_order["+"] = 20;
-		op_order["*"] = 30;
-	}
+	Parser(const char* from, const char* to) :code(to), lex(from) { locals.push_back(0); }
 	void parse_from_file(ProgramInfo& program) {
-		Token x;
-		int alloc_count = 0;
+	    bool m_running=false;
+		//cur.type = VAR_TYPE::TYPE_NOP;
 		do {
 			try {
 				x = lex.next_tok();
 				switch (x.type) {
+				case TOKEN_LCB:
+					locals.push_back(0);
+					break;
+				case TOKEN_RCB:
+					tempi = locals[locals.size() - 1];
+					locals.pop_back();
+					for (int i = 0; i < tempi; ++i) {
+						alloc_count -= 4;
+						vars.pop_back();
+					}
+					break;
 				case TOKEN_INT:
 					x = lex.next_tok();
-					h_assert(x.type == TOKEN_IDENTIFIER, TRAP_UNKNOWN, "TODO!");
+					h_assert(x.type == TOKEN_IDENTIFIER);
 					temp_name = x.data;
 					x = lex.next_tok();
-					//int <identifier>; VARIABLE DECLARATION
 					if (x.type == TOKEN_SEMICOLON) {
-						h_assert(vars.find(temp_name) == vars.end(), TRAP_UNKNOWN, "not implemented!");
-						vars[temp_name] = m_Var(alloc_count, TYPE_INT);
+						for (int i = 0; i < vars.size(); ++i) { h_assert(vars[i].name != temp_name); }
+						locals[locals.size() - 1]++;
+						vars.push_back(m_Var(temp_name, alloc_count, VAR_TYPE::TYPE_INT));
 						alloc_count += 4;
 						break;
 					}
-					//int <identifier>=VARIABLE DECLARATION AND ASSIGMENT
-					h_assert(x.type == TOKEN_EQ, TRAP_UNKNOWN, "TODO!");//=
-					//parse expr
-					temp_stack1c = 0; temp_stack2c = 0;
-					push_expr_to_stack(Token(TOKEN_PLUS));
-					for (int i = 0; i < temp_stack2c; ++i) {
-						for (int j = i+1; j < temp_stack2c; ++j) {
-							if (op_order[temp_stack2[i]] < op_order[temp_stack2[j]]) {
-								swap(temp_stack2[i], temp_stack2[j]);
-								swap(temp_stack1[i], temp_stack1[j]);
-								swap(temp_stack1[i+1], temp_stack1[j+1]);
-							}
-						}
-					}
-					code.i_mov("eax", temp_stack1[0].data.c_str());
-					for (int i=0;i<temp_stack2c;++i) {
-						if (temp_stack2[i] == "+") code.i_add("eax", temp_stack1[i + 1].data.c_str());
-						else if (temp_stack2[i] == "*") code.i_mul("eax", temp_stack1[i + 1].data.c_str());
-					}
-					h_assert(vars.find(temp_name) == vars.end(), TRAP_UNKNOWN, "not implemented!");
-					vars[temp_name] = m_Var(alloc_count, TYPE_INT);
-					code.i_store32(alloc_count, "eax");
+					h_assert(x.type == TOKEN_EQ);
+					f = lex.next_tok();
+					h_assert(f.type == TOKEN_INT_NUMBER);
+					code.i_movq(EA0, atoi(f.data.c_str()));
+					m_running=true;
+                    while (m_running) {
+                        x = lex.next_tok();
+                        switch (x.type) {
+                        case TOKEN_INT_NUMBER:
+                            if (f.type==TOKEN_MUL) code.i_mulq(EA0, atoi(x.data.c_str()));
+                            else if (f.type==TOKEN_PLUS) code.i_addq(EA0, atoi(x.data.c_str()));
+                            else h_assert(false);
+                            break;
+                        case TOKEN_IDENTIFIER:
+                            h_assert(false);
+                        case TOKEN_MINUS:
+                            break;
+                        case TOKEN_PLUS:
+                            break;
+                        case TOKEN_MUL:
+                            break;
+                        case TOKEN_SEMICOLON:
+                            m_running=false;
+                            break;
+                        default:
+                            h_assert(false);
+                        }
+                        f=x;
+                    }
+					for (int i = 0; i < vars.size(); ++i) { h_assert(vars[i].name != temp_name); }
+					locals[locals.size() - 1]++;
+					vars.push_back(m_Var(temp_name, alloc_count, VAR_TYPE::TYPE_INT));
+
+					//code.i_movq(EA0, atoi(temp_val.c_str()));
+					code.i_store32(alloc_count, EA0);
 					alloc_count += 4;
 					break;
-				case TOKEN_INT_NUMBER:
-					break;
 				case TOKEN_IDENTIFIER:
-					//TODO add identifiers
 					temp_name = x.data;
-					h_assert(vars.find(temp_name) != vars.end(), TRAP_UNKNOWN, "TODO!");
+					tempi = -1;
+					for (int i = 0; i < vars.size(); ++i) { if (vars[i].name == temp_name) { tempi = i; } }
+					h_assert(tempi != -1);
 					x = lex.next_tok();
-					h_assert(x.type == TOKEN_EQ, TRAP_UNKNOWN, "not implemented!");
-					temp_stack1c = 0; temp_stack2c = 0;
-					push_expr_to_stack(Token(TOKEN_PLUS));
-					for (int i = 0; i < temp_stack2c; ++i) {
-						for (int j = i + 1; j < temp_stack2c; ++j) {
-							if (op_order[temp_stack2[i]] < op_order[temp_stack2[j]]) {
-								swap(temp_stack2[i], temp_stack2[j]);
-								swap(temp_stack1[i], temp_stack1[j]);
-								swap(temp_stack1[i + 1], temp_stack1[j + 1]);
-							}
-						}
-					}
-					code.i_mov("eax", temp_stack1[0].data.c_str());
-					for (int i = 0; i < temp_stack2c; ++i) {
-						if (temp_stack2[i] == "+") code.i_add("eax", temp_stack1[i + 1].data.c_str());
-						else if (temp_stack2[i] == "*") code.i_mul("eax", temp_stack1[i + 1].data.c_str());
-					}
-					code.i_store32(vars[temp_name].pos, "eax");
+					h_assert(x.type == TOKEN_EQ);
+					x = lex.next_tok();
+					h_assert(x.type == TOKEN_INT_NUMBER);
+					x = lex.next_tok();
+					h_assert(x.type == TOKEN_SEMICOLON);
+					code.i_movq(EA0, atoi(x.data.c_str()));
+					code.i_store32(vars[tempi].pos, EA0);
 					break;
 				case TOKEN_EOF:
 					h_assert(false, TRAP_OK, "0 errors");
@@ -353,8 +260,9 @@ public:
 };
 int main()
 {
-	Parser pars("my.code", "any.asm");
+	Parser pars("my.code", "any.sb");
 	ProgramInfo p; pars.parse_from_file(p);
 	if (p.res != TRAP_OK) cout << "Trap " << p.res << "! " << p.errorlog << '\n';
+	else cout << "OK";
 	return 0;
 }
